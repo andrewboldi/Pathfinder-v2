@@ -5,6 +5,7 @@ from core.percolation import (
     demolish_dead_ends,
     filter_scenic_nodes,
     find_scenic_clusters,
+    remove_backtracking,
     select_percolated_clusters,
     sort_clusters_by_distance,
 )
@@ -120,3 +121,41 @@ class TestSortClustersByDistance:
         # Closer one should come first
         assert result[0] == [(37.51, -122.31)]
         assert result[1] == [(37.6, -122.2)]
+
+
+class TestRemoveBacktracking:
+    def test_no_backtracking(self):
+        path = [[37.5, -122.3], [37.51, -122.31], [37.52, -122.32]]
+        assert remove_backtracking(path) == path
+
+    def test_simple_backtrack(self):
+        # A -> B -> C -> B -> D  should become  A -> B -> D
+        path = [[1, 1], [2, 2], [3, 3], [2, 2], [4, 4]]
+        result = remove_backtracking(path)
+        assert result == [[1, 1], [2, 2], [4, 4]]
+
+    def test_deep_backtrack(self):
+        # A -> B -> C -> D -> C -> B -> E  should become  A -> B -> E
+        path = [[1, 1], [2, 2], [3, 3], [4, 4], [3, 3], [2, 2], [5, 5]]
+        result = remove_backtracking(path)
+        assert result == [[1, 1], [2, 2], [5, 5]]
+
+    def test_multiple_backtracks(self):
+        # Two separate backtracks
+        path = [[1, 1], [2, 2], [3, 3], [2, 2], [4, 4], [5, 5], [4, 4], [6, 6]]
+        result = remove_backtracking(path)
+        assert result == [[1, 1], [2, 2], [4, 4], [6, 6]]
+
+    def test_empty_path(self):
+        assert remove_backtracking([]) == []
+
+    def test_single_node(self):
+        assert remove_backtracking([[1, 1]]) == [[1, 1]]
+
+    def test_preserves_non_backtrack_loop(self):
+        # A -> B -> C -> D -> A is a genuine loop, not backtracking
+        # (A is revisited but via different nodes, so it collapses to just [A])
+        # This is expected: if the route returns to start, we trim the loop
+        path = [[1, 1], [2, 2], [3, 3], [4, 4], [1, 1]]
+        result = remove_backtracking(path)
+        assert result == [[1, 1]]

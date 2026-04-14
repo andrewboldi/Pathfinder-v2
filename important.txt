@@ -1,2 +1,0 @@
-I think we should search fro scenic nodes in the ellipse but still allow for navigation to occur with any node!!!!
-node demolition is slow because we delete a node then have to recheck all the other ones. Maybe we should just have pointers or something. idk the datatype that makes this easy

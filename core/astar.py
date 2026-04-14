@@ -1,129 +1,93 @@
-import numpy as np
-import tqdm
-from datetime import datetime
+import heapq
 
 from core.geo import distance
 
 
-def astar_search(start: str, end: str, tree: dict, all_nodes) -> list:
+def astar_search(start: str, end: str, tree: dict, all_nodes=None,
+                 max_iterations: int = 500_000) -> list:
     """A* search from start to end using the given adjacency tree.
 
     Args:
         start: 'lat,lon' string for start node
         end: 'lat,lon' string for end node
         tree: adjacency dict {node: [[adjacent_node, cost], ...]}
-        all_nodes: iterable of all node keys (for heuristic precomputation)
+        all_nodes: unused, kept for API compatibility
+        max_iterations: safety limit to prevent infinite loops
 
     Returns:
-        List of 'lat,lon' strings representing the optimal path.
+        List of 'lat,lon' strings representing the path, or empty list if
+        no path is found.
     """
-    print("Starting heuristic calculations...")
-    starttime = datetime.now()
-    heuristic = {}
-    for coord in tqdm.tqdm(all_nodes, desc="Heuristic Calculations"):
-        heuristic[coord] = distance(coord, end)
-    endtime = datetime.now()
-    print(f"Heuristic Calculations took {endtime - starttime}s!\n")
+    if start == end:
+        return [start]
 
-    cost = {start: 0}
-    closed = []
-    opened = [[start, heuristic[start]]]
+    if start not in tree:
+        raise ValueError(f"Start node {start} not in graph")
 
-    count = 0
-    while True:
-        fn = [i[1] for i in opened]
-        if count % 1000 == 0:
-            print(len(fn))
-            print(heuristic[min(np.array(opened)[:, 0])])
-            if count % 10000 == 2000:
-                print(start, end)
+    # Lazy heuristic: only compute distance when we actually visit a node
+    h_cache = {}
 
-        chosen_index = fn.index(min(fn))
-        node = opened[chosen_index][0]
-        closed.append(opened[chosen_index])
-        del opened[chosen_index]
+    def h(node):
+        if node not in h_cache:
+            h_cache[node] = distance(node, end)
+        return h_cache[node]
 
-        if closed[-1][0] == end:
-            break
+    # g-cost: best known cost to reach each node
+    g = {start: 0.0}
 
-        temparr = [closed_item[0] for closed_item in closed]
-        for item in tree[node]:
-            if item[0] in temparr:
+    # Parent pointers for path reconstruction
+    parent = {start: None}
+
+    # Min-heap of (f_value, tiebreaker, node)
+    # Tiebreaker ensures stable ordering when f-values are equal
+    counter = 0
+    open_heap = [(h(start), counter, start)]
+
+    # Set of fully processed nodes
+    closed = set()
+
+    iterations = 0
+    while open_heap:
+        f_val, _, node = heapq.heappop(open_heap)
+
+        if node in closed:
+            continue
+        closed.add(node)
+
+        if node == end:
+            return _reconstruct_path(parent, end)
+
+        for neighbor, edge_cost in tree.get(node, []):
+            if neighbor in closed:
                 continue
-            cost[item[0]] = cost[node] + item[1]
-            fn_node = cost[node] + heuristic[item[0]]
-            opened.append([item[0], fn_node])
-        count += 1
 
-    # Reconstruct optimal path
-    trace_node = end
-    optimal_sequence = [end]
-    for i in range(len(closed) - 2, -1, -1):
-        check_node = closed[i][0]
-        if trace_node in [children[0] for children in tree[check_node]]:
-            children_costs = [temp[1] for temp in tree[check_node]]
-            children_nodes = [temp[0] for temp in tree[check_node]]
-            if cost[check_node] + children_costs[children_nodes.index(trace_node)] == cost[trace_node]:
-                optimal_sequence.append(check_node)
-                trace_node = check_node
+            new_g = g[node] + edge_cost
 
-    optimal_sequence.reverse()
-    return optimal_sequence
+            # Only update if this is a shorter path to the neighbor
+            if neighbor not in g or new_g < g[neighbor]:
+                g[neighbor] = new_g
+                parent[neighbor] = node
+                counter += 1
+                heapq.heappush(open_heap, (new_g + h(neighbor), counter, neighbor))
+
+        iterations += 1
+        if iterations >= max_iterations:
+            print(f"A* hit iteration limit ({max_iterations}) searching "
+                  f"{start} -> {end}. Explored {len(closed)} nodes.")
+            return []
+
+    # Open list exhausted without finding end
+    print(f"A* found no path from {start} to {end} "
+          f"(explored {len(closed)} nodes)")
+    return []
 
 
-def astar_multi_endpoint(start: str, end: str, tree: dict, all_nodes) -> list:
-    """A* variant that supports multi-endpoint heuristic (from Percolation/old.py).
-
-    Same interface as astar_search but stores heuristics as lists for
-    potential multi-endpoint extension.
-    """
-    print("Starting heuristic calculations...")
-    starttime = datetime.now()
-    heuristic = {}
-    for coord in tqdm.tqdm(all_nodes, desc="Heuristic Calculations"):
-        heuristic[coord] = [distance(coord, end)]
-    endtime = datetime.now()
-    print(f"Heuristic Calculations took {endtime - starttime}s!\n")
-
-    cost = {start: 0}
-    closed = []
-    opened = [[start, heuristic[start]]]
-
-    count = 0
-    while True:
-        fn = [i[1] for i in opened]
-        if count % 1000 == 0:
-            print(len(fn))
-            if count % 10000 == 2000:
-                print(start, end)
-
-        chosen_index = fn.index(min(fn))
-        node = opened[chosen_index][0]
-        closed.append(opened[chosen_index])
-        del opened[chosen_index]
-
-        if closed[-1][0] == end:
-            break
-
-        temparr = [closed_item[0] for closed_item in closed]
-        for item in tree[node]:
-            if item[0] in temparr:
-                continue
-            cost[item[0]] = cost[node] + item[1]
-            fn_node = cost[node] + heuristic[item[0]][0]
-            opened.append([item[0], fn_node])
-        count += 1
-
-    trace_node = end
-    optimal_sequence = [end]
-    for i in range(len(closed) - 2, -1, -1):
-        check_node = closed[i][0]
-        if trace_node in [children[0] for children in tree[check_node]]:
-            children_costs = [temp[1] for temp in tree[check_node]]
-            children_nodes = [temp[0] for temp in tree[check_node]]
-            if cost[check_node] + children_costs[children_nodes.index(trace_node)] == cost[trace_node]:
-                optimal_sequence.append(check_node)
-                trace_node = check_node
-
-    optimal_sequence.reverse()
-    return optimal_sequence
+def _reconstruct_path(parent: dict, end: str) -> list:
+    """Walk parent pointers back from end to start."""
+    path = []
+    node = end
+    while node is not None:
+        path.append(node)
+        node = parent[node]
+    path.reverse()
+    return path

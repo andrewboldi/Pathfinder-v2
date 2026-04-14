@@ -11,6 +11,9 @@ dependencies = [
     "shapely",
     "tqdm",
     "requests",
+    "fpdf2",
+    "simplekml",
+    "folium",
 ]
 
 [project.optional-dependencies]

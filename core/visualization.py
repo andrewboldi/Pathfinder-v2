@@ -25,7 +25,7 @@ def visualize(coords, start: str, end: str, critical_value: float,
     line_shapes = os.path.join(DATA_DIR, "tiger", "tl_2021_06081_roads.shp")
 
     gdf = gpd.read_file(line_shapes)
-    gdf.plot(figsize=(300, 100))
+    gdf.plot(figsize=(30, 10))
     plt.xlim([-122.60, -122.00])
     plt.ylim([37.0, 37.8])
     plt.scatter(x, y, color="red")
@@ -44,4 +44,5 @@ def visualize(coords, start: str, end: str, critical_value: float,
             f"p{critical_value}_{basefilename}_{start}_{end}.png",
         )
 
-    plt.savefig(output_path)
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    print(f"Saved to {output_path}")

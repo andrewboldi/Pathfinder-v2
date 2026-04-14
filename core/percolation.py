@@ -3,12 +3,12 @@ import json
 import statistics as stats
 from random import shuffle
 from math import radians, degrees, cos, sin, atan2, sqrt
+from collections import defaultdict, deque
 
 import tqdm
 
 from core.geo import R, str_to_tuple, tuple_to_str, distance, midpoint, find_closest_node
 from core.astar import astar_search
-from core.visualization import visualize
 from core.config import DATA_DIR, OUTPUT_DIR
 
 
@@ -71,29 +71,42 @@ def filter_by_ellipse(original_tree: dict, start: str, end: str,
 
 
 def demolish_dead_ends(tree: dict) -> dict:
-    """Iteratively remove dead-end nodes (nodes with only 1 adjacent node)."""
-    def demolish_node(node: str):
-        for coord in list(tree.keys()):
-            if coord not in tree:
-                continue
-            arr = [x[0] for x in tree[coord]]
-            if node in arr:
-                ind = arr.index(node)
-                del tree[coord][ind]
+    """Iteratively remove dead-end nodes (nodes with <=1 neighbor).
+
+    Uses a reverse adjacency index and queue for O(n) performance
+    instead of the O(n^2) brute-force scan.
+    """
+    # Build reverse index: for each node, which nodes have it as a neighbor?
+    reverse = defaultdict(set)
+    for node, neighbors in tree.items():
+        for nb, _ in neighbors:
+            reverse[nb].add(node)
+
+    # Seed queue with all current dead ends
+    queue = deque()
+    for node, neighbors in tree.items():
+        if len(neighbors) <= 1:
+            queue.append(node)
 
     before = len(tree)
-    count = 1
-    while count != 0:
-        count = 0
-        for coord in tqdm.tqdm(list(tree.keys()), desc="Demolishing dead end nodes..."):
-            if coord not in tree:
+    while queue:
+        node = queue.popleft()
+        if node not in tree:
+            continue
+        if len(tree[node]) > 1:
+            continue  # no longer a dead end (was fixed by another removal)
+
+        # Remove this node from all parents' neighbor lists
+        for parent in reverse.get(node, set()):
+            if parent not in tree:
                 continue
-            if len(tree[coord]) <= 1:
-                demolish_node(coord)
-                del tree[coord]
-                count += 1
-    after = len(tree)
-    print(f"Removed {before - after} dead ends")
+            tree[parent] = [nb for nb in tree[parent] if nb[0] != node]
+            if len(tree[parent]) <= 1:
+                queue.append(parent)
+
+        del tree[node]
+
+    print(f"Removed {before - len(tree)} dead ends")
     return tree
 
 
@@ -138,8 +151,75 @@ def select_percolated_clusters(clusters: list, n_clusters: int) -> list:
     return percolated[: min(len(percolated), n_clusters)]
 
 
+def remove_backtracking(path: list, near_threshold_mi: float = 0.03) -> list:
+    """Remove backtracking loops where the route revisits a node or near-node.
+
+    Pass 1 (exact): When path goes A -> B -> C -> B -> D, detects B is
+    revisited and trims to A -> B -> D.
+
+    Pass 2 (near): When path goes A -> B -> C -> D -> A' where A' is within
+    near_threshold_mi of A, trims the short detour. This catches cases where
+    the route exits a side street at a slightly different point on the main road.
+    """
+    # Pass 1: exact node match
+    seen = {}
+    result = []
+    for node in path:
+        key = (round(node[0], 6), round(node[1], 6))
+        if key in seen:
+            idx = seen[key]
+            removed = result[idx + 1:]
+            result = result[:idx + 1]
+            for r in removed:
+                rkey = (round(r[0], 6), round(r[1], 6))
+                if rkey in seen and seen[rkey] > idx:
+                    del seen[rkey]
+        else:
+            seen[key] = len(result)
+            result.append(node)
+
+    # Pass 2: near-node match (short detours back to ~same spot)
+    changed = True
+    while changed:
+        changed = False
+        i = 0
+        new_result = []
+        while i < len(result):
+            # Look ahead for a node close to result[i] (within threshold)
+            found_near = -1
+            for j in range(i + 3, min(i + 20, len(result))):
+                d = distance(
+                    f"{result[i][0]},{result[i][1]}",
+                    f"{result[j][0]},{result[j][1]}"
+                )
+                if d < near_threshold_mi:
+                    # Check that the detour path distance is short
+                    detour_dist = 0.0
+                    for k in range(i, j):
+                        detour_dist += distance(
+                            f"{result[k][0]},{result[k][1]}",
+                            f"{result[k+1][0]},{result[k+1][1]}"
+                        )
+                    # Only trim if the detour is < 0.3 mi (short side street)
+                    if detour_dist < 0.3:
+                        found_near = j
+                        break
+            if found_near > 0:
+                new_result.append(result[i])
+                i = found_near  # skip the detour
+                changed = True
+            else:
+                new_result.append(result[i])
+                i += 1
+        result = new_result
+
+    return result
+
+
 def sort_clusters_by_distance(clusters: list, start: str):
     """Sort clusters by distance from start."""
+    if not clusters:
+        return []
     dist_start = [distance(tuple_to_str(c[0]), start) for c in clusters]
     dist_start, clusters = zip(*sorted(zip(dist_start, clusters), key=lambda x: x[0]))
     return list(clusters)
@@ -196,16 +276,32 @@ def run_percolation_pipeline(start: str, end: str, eccentricity: float,
                           f"100distance{'dropout_dropout' if dropout else ''}.txt")).read()
     )
 
+    if not percolated_clusters:
+        print("No scenic clusters found. Running direct A* from start to end.")
+        path = astar_search(start, end, distance_tree)
+        if not path:
+            print("ERROR: No path found between start and end.")
+            return []
+        final_path = [list(str_to_tuple(loc)) for loc in path]
+        return final_path
+
+    # Build waypoint sequence: start -> cluster0 -> cluster1 -> ... -> end
+    waypoints = [start]
+    for cluster in percolated_clusters:
+        waypoints.append(tuple_to_str(cluster[0]))
+    waypoints.append(end)
+
     paths = []
-    for i, cluster in enumerate(percolated_clusters):
-        target = tuple_to_str(cluster[0])
-        if i == 0:
-            paths.append(astar_search(start, target, distance_tree, original_tree.keys()))
-        else:
-            prev_target = tuple_to_str(percolated_clusters[i - 1][0])
-            paths.append(astar_search(prev_target, target, distance_tree, original_tree.keys()))
-        if i == len(percolated_clusters) - 1:
-            paths.append(astar_search(target, end, distance_tree, original_tree.keys()))
+    for i in range(len(waypoints) - 1):
+        segment = astar_search(waypoints[i], waypoints[i + 1], distance_tree)
+        if not segment:
+            print(f"WARNING: No path from {waypoints[i]} to {waypoints[i+1]}, skipping cluster.")
+            continue
+        # Avoid duplicating the junction node between segments
+        if paths and paths[-1] and segment[0] == paths[-1][-1]:
+            segment = segment[1:]
+        if segment:
+            paths.append(segment)
 
     # Collect final path
     final_path = []
@@ -213,11 +309,21 @@ def run_percolation_pipeline(start: str, end: str, eccentricity: float,
     result_path = os.path.join(
         OUTPUT_DIR, "routes", f"{start},{end},{p},{eccentricity},{n_clusters}.txt"
     )
-    with open(result_path, "a") as f:
+    with open(result_path, "w") as f:
         for path in paths:
             for location in path:
                 final_path.append(list(str_to_tuple(location)))
-                f.write(str(list(str_to_tuple(str(location)))))
+                f.write(str(list(str_to_tuple(str(location)))) + "\n")
 
-    visualize(final_path, start, end, critical_value, basefilename)
+    if not final_path:
+        print("ERROR: Could not construct any path.")
+        return []
+
+    # Remove backtracking (dead-end detours where route revisits nodes)
+    before = len(final_path)
+    final_path = remove_backtracking(final_path)
+    removed = before - len(final_path)
+    if removed:
+        print(f"Removed {removed} backtracking nodes ({before} -> {len(final_path)})")
+
     return final_path
